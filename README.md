@@ -11,7 +11,7 @@ removed the HFS Standard read driver in **10.15 Catalina**, so nothing on a
 current Mac can interpret the volume.
 
 Tested on macOS 26.5.2, Apple M4 Max, with an Apple USB SuperDrive, against two
-CD-ROMs mastered in 2007 and 2013. 8,806 files recovered.
+CD-ROMs mastered in 2007 and 2013. 8,806 files recovered, nothing lost.
 
 ---
 
@@ -51,36 +51,84 @@ The raw character device output is byte-identical to `hdiutil`'s.
 
 ---
 
-## Should you use these scripts?
+## Use ddrescue, not `chunkrip.sh`
 
-Probably only `verify.py`. Be honest about what already exists:
+**Verified against a real disc.** `ddrescue` recovered 527 more files than
+`chunkrip.sh` from the same CD, on the same drive, in the same session.
 
-| task | mature tool | what's here |
-| --- | --- | --- |
-| rip a failing disc, resumably | **[GNU ddrescue](https://www.gnu.org/software/ddrescue/)** | `chunkrip.sh` — a smaller version of the same idea |
-| extract files from an HFS image | **[HFSExplorer](https://www.catacombae.org/hfsexplorer/)**, [`hfsutils`](https://www.mars.org/home/rob/proj/hfs/) | `ripcd.py` — no Java, no install |
-| prove the rip is not silently corrupt | — | `verify.py` |
+| | files still unrecovered |
+| --- | --- |
+| `chunkrip.sh` | 530 |
+| `ddrescue`, first pass | 109 |
+| `ddrescue`, resumed once | 25 |
+| `ddrescue`, resumed twice | 3 |
+| `ddrescue -R`, one 9-second pass | **0** |
 
-`ddrescue` has a mapfile for resume, `-R` for reverse passes, `-b` for sector
-size, and adaptive bad-area splitting that `chunkrip.sh` does not attempt. If
-you can install it, prefer it:
+Nothing on that disc turned out to be physically unreadable. Every file came
+back.
+
+The difference is granularity. `chunkrip.sh` works in 1.2 MB chunks and discards
+the whole chunk if any sector in it fails. `ddrescue` maps bad areas at sector
+level and keeps everything readable around them. On a disc whose outer edge is
+marginal, that is the entire ballgame — 527 files that looked physically lost
+were not.
 
 ```bash
 brew install ddrescue
-ddrescue -b 2352 -r3    /dev/rdisk62 disc.raw disc.map
-ddrescue -b 2352 -r3 -R /dev/rdisk62 disc.raw disc.map   # reverse pass
+SIZE=$(( $(drutil status | awk '/blocks:/{print $3}') * 2352 ))
+
+ddrescue -b 2352 -r3            /dev/rdisk62 disc.raw disc.map   # forward
+ddrescue -b 2352 -r3 -R -s $SIZE /dev/rdisk62 disc.raw disc.map   # then reverse
 ```
 
-*Not yet verified against a real disc — the scripts here were used for the
-actual recovery. Reports welcome.*
+Re-run the identical command after reconnecting the drive to resume. The mapfile
+records what is already read; verified byte-for-byte that a resume leaves the
+recovered region untouched and fills only the gaps.
 
-HFSExplorer reads HFS, HFS+ and HFSX, handles raw images and Apple Partition
-Map natively, and predates this by many years. `ripcd.py` exists because it
-needs nothing but Python 3 and because it reports catalog counts, which is what
-made the corruption visible in the first place.
+**Finish with a reverse pass.** Forward passes give up on the outer edge, which
+is exactly where a worn disc fails. Reverse starts at the end, so it reaches
+that region while the drive is still healthy. On the test disc a single
+nine-second reverse pass recovered the 25 sectors that three forward passes
+never reached — and that was the difference between "3 files physically lost"
+and a complete recovery.
 
-**What is not already covered is verification.** That is the one thing worth
-taking from this repo.
+**`-R` needs `-s` on a raw optical device.** ddrescue cannot determine the size
+of `/dev/rdiskN`, and reverse has to know where the end is. Without it the
+mapfile comes out with a nonsense size and nothing is read:
+
+```
+0x00000000  0x7FFFCCA9818BD890  ?
+```
+
+**`-b` must match the CD sector size, and `-s` must be a multiple of it.**
+Otherwise the raw device rejects the read:
+
+```
+ddrescue: /dev/rdisk62: Unaligned read error. Is sector size correct?
+```
+
+**Check the mapfile, not the file size.** ddrescue writes at the offset it
+reads, so the output reaches full length long before every sector is filled.
+A `*` or `?` region in the mapfile means those bytes are still zeros:
+
+```bash
+grep -v '^#' disc.map      # + = rescued, * = needs retry, - = bad, ? = untried
+```
+
+## What is actually worth taking from this repo
+
+| task | use | note |
+| --- | --- | --- |
+| rip a failing disc | **[GNU ddrescue](https://www.gnu.org/software/ddrescue/)** | `chunkrip.sh` is kept only as a zero-dependency fallback |
+| extract files from an HFS image | **[HFSExplorer](https://www.catacombae.org/hfsexplorer/)**, [`hfsutils`](https://www.mars.org/home/rob/proj/hfs/) | `ripcd.py` needs no Java and prints catalog counts |
+| **prove the rip is not silently corrupt** | **`verify.py`** | nothing else found does this |
+
+HFSExplorer reads HFS, HFS+ and HFSX, handles raw images and Apple Partition Map
+natively, and predates this by many years.
+
+`verify.py` is the part with no equivalent. It accepts any correctly-sectored
+image, including one produced by `ddrescue` or `hdiutil`, so it works as a check
+on someone else's rip.
 
 ---
 
@@ -92,21 +140,17 @@ drutil status
 DEV=/dev/rdisk62
 TOTAL=$(drutil status | awk '/blocks:/{print $3}')
 
-# 2. Rip. Resumable — re-run after a drive dropout and it continues
-./chunkrip.sh $DEV disc.raw $TOTAL
+# 2. Rip forward, then reverse. Re-run either after a drive dropout to resume
+SIZE=$(( TOTAL * 2352 ))
+ddrescue -b 2352 -r3             $DEV disc.raw disc.map
+ddrescue -b 2352 -r3 -R -s $SIZE $DEV disc.raw disc.map
 
-# 3. If the drive keeps dying at a fixed spot, secure the rest first
-./chunkrip.sh $DEV disc.raw $TOTAL reverse
-
-# 4. Extract
+# 3. Extract
 ./ripcd.py disc.raw ./out
 
-# 5. Prove the rip was good before you trust it
+# 4. Prove the rip was good before you trust it
 ./verify.py disc.raw --extracted ./out
 ```
-
-`verify.py` accepts any correctly-sectored image, including one produced by
-`ddrescue` or `hdiutil`, so you can use it as a check on someone else's rip.
 
 ```
 volume 'IRYO'
@@ -154,8 +198,9 @@ the drive dies at a fixed spot — the outer edge of a disc is where scratches a
 dirt concentrate. Chunks that fail while the drive is still alive are recorded
 as bad and skipped on later runs.
 
-Again: `ddrescue` does all of this and more. This exists for the case where you
-want zero dependencies.
+`ddrescue` does all of this, at sector granularity instead of 1.2 MB chunks,
+and recovered 527 more files on the same disc. Use it unless you cannot install
+anything.
 
 ### `ripcd.py`
 

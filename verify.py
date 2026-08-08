@@ -19,6 +19,7 @@ import hashlib
 import os
 import struct
 import sys
+import zlib
 from collections import Counter
 
 from ripcd import NODE, Volume, partitions, user_data
@@ -45,9 +46,34 @@ def duplicate_leaf_nodes(vol):
     return leaves, sum(v - 1 for v in seen.values() if v > 1)
 
 
+def png_ok(b):
+    """Validate every PNG chunk's CRC-32, not just the header and IEND.
+
+    Head-and-tail checks pass on a file whose middle was replaced by a bad read:
+    the magic bytes and the end marker survive, only the pixels are wrong. PNG
+    carries a CRC per chunk, so it can be checked properly. That is what made it
+    possible to tell two rips of the same disc apart.
+    """
+    if b[:8] != b'\x89PNG\r\n\x1a\n':
+        return False
+    i = 8
+    while i + 12 <= len(b):
+        length = struct.unpack_from('>I', b, i)[0]
+        kind = b[i + 4:i + 8]
+        if i + 12 + length > len(b):
+            return False
+        stored = struct.unpack_from('>I', b, i + 8 + length)[0]
+        if zlib.crc32(kind + b[i + 8:i + 8 + length]) & 0xFFFFFFFF != stored:
+            return False
+        i += 12 + length
+        if kind == b'IEND':
+            return True
+    return False
+
+
 SIGNATURES = {
     ('.jpg', '.jpeg'): (lambda b: b[:2] == b'\xff\xd8' and b.rstrip(b'\x00')[-2:] == b'\xff\xd9'),
-    ('.png',): (lambda b: b[:8] == b'\x89PNG\r\n\x1a\n' and b'IEND' in b[-16:]),
+    ('.png',): png_ok,
     ('.gif',): (lambda b: b[:6] in (b'GIF87a', b'GIF89a') and b.rstrip(b'\x00')[-1:] == b';'),
     ('.tif', '.tiff'): (lambda b: b[:4] in (b'II*\x00', b'MM\x00*')),
     ('.pdf',): (lambda b: b[:5] == b'%PDF-' and b'%%EOF' in b[-1024:]),
