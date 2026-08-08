@@ -11,7 +11,7 @@ removed the HFS Standard read driver in **10.15 Catalina**, so nothing on a
 current Mac can interpret the volume.
 
 Tested on macOS 26.5.2, Apple M4 Max, with an Apple USB SuperDrive, against two
-CD-ROMs mastered in 2007 and 2013. 8,806 files recovered.
+CD-ROMs mastered in 2007 and 2013. 8,806 files recovered, nothing lost.
 
 ---
 
@@ -61,9 +61,11 @@ The raw character device output is byte-identical to `hdiutil`'s.
 | `chunkrip.sh` | 530 |
 | `ddrescue`, first pass | 109 |
 | `ddrescue`, resumed once | 25 |
-| `ddrescue`, resumed twice | **3** |
+| `ddrescue`, resumed twice | 3 |
+| `ddrescue -R`, one 9-second pass | **0** |
 
-The three that remain are one physically dead 2352-byte sector.
+Nothing on that disc turned out to be physically unreadable. Every file came
+back.
 
 The difference is granularity. `chunkrip.sh` works in 1.2 MB chunks and discards
 the whole chunk if any sector in it fails. `ddrescue` maps bad areas at sector
@@ -73,23 +75,45 @@ were not.
 
 ```bash
 brew install ddrescue
-ddrescue -b 2352 -r3 /dev/rdisk62 disc.raw disc.map
+SIZE=$(( $(drutil status | awk '/blocks:/{print $3}') * 2352 ))
+
+ddrescue -b 2352 -r3            /dev/rdisk62 disc.raw disc.map   # forward
+ddrescue -b 2352 -r3 -R -s $SIZE /dev/rdisk62 disc.raw disc.map   # then reverse
 ```
 
 Re-run the identical command after reconnecting the drive to resume. The mapfile
 records what is already read; verified byte-for-byte that a resume leaves the
 recovered region untouched and fills only the gaps.
 
-**`-b` must match the CD sector size.** If you also restrict the domain with
-`-s` or `-i`, those values must be multiples of 2352, or the raw device rejects
-the read:
+**Finish with a reverse pass.** Forward passes give up on the outer edge, which
+is exactly where a worn disc fails. Reverse starts at the end, so it reaches
+that region while the drive is still healthy. On the test disc a single
+nine-second reverse pass recovered the 25 sectors that three forward passes
+never reached — and that was the difference between "3 files physically lost"
+and a complete recovery.
+
+**`-R` needs `-s` on a raw optical device.** ddrescue cannot determine the size
+of `/dev/rdiskN`, and reverse has to know where the end is. Without it the
+mapfile comes out with a nonsense size and nothing is read:
+
+```
+0x00000000  0x7FFFCCA9818BD890  ?
+```
+
+**`-b` must match the CD sector size, and `-s` must be a multiple of it.**
+Otherwise the raw device rejects the read:
 
 ```
 ddrescue: /dev/rdisk62: Unaligned read error. Is sector size correct?
 ```
 
-A whole-device read needs no `-s`, since the device size is already a multiple
-of the sector size.
+**Check the mapfile, not the file size.** ddrescue writes at the offset it
+reads, so the output reaches full length long before every sector is filled.
+A `*` or `?` region in the mapfile means those bytes are still zeros:
+
+```bash
+grep -v '^#' disc.map      # + = rescued, * = needs retry, - = bad, ? = untried
+```
 
 ## What is actually worth taking from this repo
 
@@ -116,8 +140,10 @@ drutil status
 DEV=/dev/rdisk62
 TOTAL=$(drutil status | awk '/blocks:/{print $3}')
 
-# 2. Rip. Re-run the same command after a drive dropout to resume
-ddrescue -b 2352 -r3 $DEV disc.raw disc.map
+# 2. Rip forward, then reverse. Re-run either after a drive dropout to resume
+SIZE=$(( TOTAL * 2352 ))
+ddrescue -b 2352 -r3             $DEV disc.raw disc.map
+ddrescue -b 2352 -r3 -R -s $SIZE $DEV disc.raw disc.map
 
 # 3. Extract
 ./ripcd.py disc.raw ./out
