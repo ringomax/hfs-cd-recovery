@@ -5,3 +5,5 @@
 *.progress
 *.bad
 out/
+__pycache__/
+*.pyc
