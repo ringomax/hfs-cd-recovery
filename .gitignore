@@ -1,0 +1,7 @@
+*.raw
+*.cdr
+*.hfs
+*.img
+*.progress
+*.bad
+out/
