@@ -13,6 +13,10 @@ current Mac can interpret the volume.
 Tested on macOS 26.5.2, Apple M4 Max, with an Apple USB SuperDrive, against two
 CD-ROMs mastered in 2007 and 2013. 8,806 files recovered, nothing lost.
 
+**Write-up (Japanese):** [【解決】Macで古いCDが読み込めない原因と、中身を取り出す方法](https://ringomax.jp/blog/mac-cannot-read-old-cd)
+— how the cause was traced down to the two bytes at offset 1024, why the buffered
+device silently corrupts the read, and what each step of these scripts is for.
+
 ---
 
 ## The part that matters: read `/dev/rdiskN`, not `/dev/diskN`
